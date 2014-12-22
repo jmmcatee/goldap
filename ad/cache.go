@@ -21,7 +21,7 @@ type ldapObject struct {
 	ObjectSID      ldap.SID
 	SAMAccountName string
 	Member         []ldap.ObjectDN
-	Realm string `ldap:"-"`
+	Realm          string `ldap:"-"`
 }
 
 type User ldapObject
@@ -70,7 +70,7 @@ func (c *ldapMech) dial(network, addr string) (net.Conn, error) {
 }
 
 func (c *ldapMech) Connect(rw io.ReadWriter) (io.ReadWriter, error) {
-	serv := "ldap/"+c.addr
+	serv := "ldap/" + c.addr
 	if strings.HasSuffix(serv, ".") {
 		serv = serv[:len(serv)-1]
 	}
@@ -107,13 +107,14 @@ type DB struct {
 	cfg        ldap.ClientConfig
 
 	// the cache maps are locked
-	lk      sync.Mutex
-	dnusers map[ldap.ObjectDN]interface{}
-	prusers map[principal]*User
+	lk       sync.Mutex
+	dnusers  map[ldap.ObjectDN]interface{}
+	prusers  map[principal]*User
+	prgroups map[principal]*Group
 }
 
 type principal struct {
-	User, Realm string
+	SAMAccountName, Realm string
 }
 
 // New creates a new active directory database connection using the specified
@@ -128,6 +129,7 @@ func New(cred *kerb.Credential, baseAlias string) *DB {
 		realmAlias: make(map[string]string),
 		dnusers:    make(map[ldap.ObjectDN]interface{}),
 		prusers:    make(map[principal]*User),
+		prgroups:   make(map[principal]*Group),
 	}
 
 	m := &ldapMech{c, ""}
@@ -140,7 +142,7 @@ func New(cred *kerb.Credential, baseAlias string) *DB {
 
 	// Figure out the SID of the base realm
 	parts := strings.Split(cred.Realm(), ".")
-	o, _ := c.LookupDN(ldap.ObjectDN("CN=Administrator,CN=Users,DC=" + strings.Join(parts, ",DC=")))
+	o, _ := c.LookupDN(ldap.ObjectDN("CN=Domain Users,CN=Users,DC=" + strings.Join(parts, ",DC=")))
 	if u, _ := o.(*User); u != nil {
 		if dsid, err := u.ObjectSID.Domain(); err == nil {
 			c.sidRealm[dsid.String()] = cred.Realm()
@@ -261,6 +263,52 @@ func (c *DB) ResolvePrincipal(user string) (string, string, error) {
 	return "", "", ErrNoRealm
 }
 
+// LookupGroup lookus up and returns a Group object for a given group and
+// kerberose principal. Lookups are cached and should be flushed every so often
+// by calling FlushCache.
+func (c *DB) LookupGroup(group, realm string) (*Group, error) {
+	gr := principal{group, realm}
+
+	c.lk.Lock()
+	g := c.prgroups[gr]
+	c.lk.Unlock()
+
+	if g != nil {
+		return g, nil
+	}
+
+	filter := ldap.Equal{"SAMAccountName", []byte(group)}
+
+	db := c.dbs[realm]
+	if db == nil {
+		return nil, ErrInvalidRealm
+	}
+
+	obj := ldapObject{Realm: realm}
+	if err := db.SearchTree(&obj, db.base, filter); err != nil {
+		return nil, err
+	}
+
+	// Verify what we got back is a group
+	var isGroup bool
+	for _, v := range obj.ObjectClass {
+		if v == "group" {
+			isGroup = true
+		}
+	}
+
+	if !isGroup {
+		return nil, errors.New("Returned object that is not a group.")
+	}
+
+	g = (*Group)(&obj)
+	c.lk.Lock()
+	c.prgroups[gr] = g
+	c.lk.Unlock()
+
+	return g, nil
+}
+
 // LookupPrincipal looks up and returns a User object for a given user and
 // kerberos principal. If you have a Win 2000 style user name (e.g.
 // AM/MyAccount) then use ResolvePrincipal first. Lookups are cached and
@@ -286,6 +334,18 @@ func (c *DB) LookupPrincipal(user, realm string) (*User, error) {
 	obj := ldapObject{Realm: realm}
 	if err := db.SearchTree(&obj, db.base, filter); err != nil {
 		return nil, err
+	}
+
+	// Verify what we got back is a group
+	var isPerson bool
+	for _, v := range obj.ObjectClass {
+		if v == "person" {
+			isPerson = true
+		}
+	}
+
+	if !isPerson {
+		return nil, errors.New("Returned object that is not a person.")
 	}
 
 	u = (*User)(&obj)
@@ -315,6 +375,8 @@ func dnToRealm(dn ldap.ObjectDN) string {
 func (c *DB) FlushCache() {
 	c.lk.Lock()
 	c.dnusers = make(map[ldap.ObjectDN]interface{})
+	c.prusers = make(map[principal]*User)
+	c.prgroups = make(map[principal]*Group)
 	c.lk.Unlock()
 }
 
@@ -344,7 +406,7 @@ func (c *DB) LookupDN(dn ldap.ObjectDN) (val interface{}, err error) {
 
 	obj := ldapObject{Realm: realm}
 	if err := db.GetObject(&obj, dn); err != nil {
-		return nil,  err
+		return nil, err
 	}
 
 	var ret interface{}
