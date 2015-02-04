@@ -309,6 +309,29 @@ func (c *DB) LookupGroup(group, realm string) (*Group, error) {
 	return g, nil
 }
 
+func (c *DB) GetAllGroups(realm string) ([]Group, error) {
+	filter := ldap.Equal{"objectClass", []byte("group")}
+
+	db := c.dbs[realm]
+	if db == nil {
+		return nil, ErrInvalidRealm
+	}
+
+	objs := []ldapObject{}
+	if err := db.SearchTree(&objs, db.base, filter); err != nil {
+		return nil, err
+	}
+
+	// Verify what we got back is a group
+	var g = []Group{}
+	for _, obj := range objs {
+		gp := (Group)(obj)
+		g = append(g, gp)
+	}
+
+	return g, nil
+}
+
 // LookupPrincipal looks up and returns a User object for a given user and
 // kerberos principal. If you have a Win 2000 style user name (e.g.
 // AM/MyAccount) then use ResolvePrincipal first. Lookups are cached and
