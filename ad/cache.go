@@ -4,8 +4,8 @@ package ad
 import (
 	"errors"
 	"fmt"
-	"github.com/jmckaskill/gokerb"
-	"github.com/jmckaskill/goldap"
+	"github.com/jmmcatee/gokerb"
+	"github.com/jmmcatee/goldap"
 	"io"
 	"net"
 	"strconv"
